@@ -1,0 +1,19 @@
+=== AGENCES ICI DORDOGNE ===
+
+VERGT
+- Agence principale
+- [Détails à compléter]
+
+LE BUGUE
+- Deuxième agence
+- [Détails à compléter]
+
+=== OUTILS ===
+
+CRM: Sweepbright
+AUTOMATISATION: Zapier
+GESTION: Trello
+
+=== EN COURS ===
+
+[À compléter par Anthony]
