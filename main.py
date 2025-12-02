@@ -135,7 +135,7 @@ def get_estate_data(estate_id, token):
     url = f"{SWEEPBRIGHT_CONFIG['api_base']}/estates/{estate_id}"
     req = urllib.request.Request(url, headers={
         'Authorization': f'Bearer {token}',
-        'Accept': 'application/json'
+        'Accept': 'application/vnd.sweepbright.v20241030+json'
     })
     
     with urllib.request.urlopen(req, timeout=30) as response:
@@ -148,7 +148,8 @@ def send_url_to_sweepbright(estate_id, site_url, token):
     
     req = urllib.request.Request(url, data=data, method='POST', headers={
         'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.sweepbright.v20241030+json'
     })
     
     with urllib.request.urlopen(req, timeout=30) as response:
