@@ -116,14 +116,14 @@ def creer_document(nom_fichier, contenu):
 def get_sweepbright_token():
     """Obtenir un token OAuth SweepBright"""
     url = f"{SWEEPBRIGHT_CONFIG['api_base']}/oauth/token"
-    data = json.dumps({
+    data = urllib.parse.urlencode({
         'grant_type': 'client_credentials',
         'client_id': SWEEPBRIGHT_CONFIG['client_id'],
         'client_secret': SWEEPBRIGHT_CONFIG['client_secret']
     }).encode('utf-8')
     
     req = urllib.request.Request(url, data=data, headers={
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/x-www-form-urlencoded'
     })
     
     with urllib.request.urlopen(req, timeout=30) as response:
