@@ -201,7 +201,7 @@ def push_file_to_github(path, content, message):
 
 def get_template_from_github(filename):
     """Récupérer un template depuis GitHub"""
-    result = github_api('GET', f'contents/templates/{filename}')
+    result = github_api('GET', f'contents/modèles/{filename}')
     if result and 'content' in result:
         return base64.b64decode(result['content']).decode('utf-8')
     return None
