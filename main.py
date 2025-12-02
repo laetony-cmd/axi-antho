@@ -5,12 +5,28 @@ import urllib.parse
 import json
 import re
 import smtplib
+import base64
+import unicodedata
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# === CONFIG SWEEPBRIGHT ===
+
+SWEEPBRIGHT_CONFIG = {
+    'client_id': '766',
+    'client_secret': 'IyuH9EKO6whBPF34JqeOlQimSv9fRmx4XeVIUzTv',
+    'api_base': 'https://website.sweepbright.com/api'
+}
+
+GITHUB_CONFIG = {
+    'owner': 'laetony-cmd',
+    'repo': 'ici-dordogne-sites',
+    'token': os.environ.get('GITHUB_TOKEN', '')
+}
 
 # === FONCTIONS FICHIERS ===
 
@@ -94,6 +110,246 @@ def creer_document(nom_fichier, contenu):
         return True, nom_fichier
     except Exception as e:
         return False, str(e)
+
+# === FONCTIONS SWEEPBRIGHT ===
+
+def get_sweepbright_token():
+    """Obtenir un token OAuth SweepBright"""
+    url = f"{SWEEPBRIGHT_CONFIG['api_base']}/oauth/token"
+    data = json.dumps({
+        'grant_type': 'client_credentials',
+        'client_id': SWEEPBRIGHT_CONFIG['client_id'],
+        'client_secret': SWEEPBRIGHT_CONFIG['client_secret']
+    }).encode('utf-8')
+    
+    req = urllib.request.Request(url, data=data, headers={
+        'Content-Type': 'application/json'
+    })
+    
+    with urllib.request.urlopen(req, timeout=30) as response:
+        result = json.loads(response.read().decode('utf-8'))
+        return result.get('access_token')
+
+def get_estate_data(estate_id, token):
+    """Récupérer les données d'un bien"""
+    url = f"{SWEEPBRIGHT_CONFIG['api_base']}/estates/{estate_id}"
+    req = urllib.request.Request(url, headers={
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json'
+    })
+    
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.loads(response.read().decode('utf-8'))
+
+def send_url_to_sweepbright(estate_id, site_url, token):
+    """Renvoyer l'URL du site à SweepBright"""
+    url = f"{SWEEPBRIGHT_CONFIG['api_base']}/estates/{estate_id}/url"
+    data = json.dumps({'url': site_url}).encode('utf-8')
+    
+    req = urllib.request.Request(url, data=data, method='POST', headers={
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json'
+    })
+    
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.loads(response.read().decode('utf-8'))
+
+# === FONCTIONS GITHUB ===
+
+def github_api(method, endpoint, data=None):
+    """Appel API GitHub"""
+    url = f"https://api.github.com/repos/{GITHUB_CONFIG['owner']}/{GITHUB_CONFIG['repo']}/{endpoint}"
+    
+    headers = {
+        'Authorization': f'token {GITHUB_CONFIG["token"]}',
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'Axi-Antho'
+    }
+    
+    if data:
+        data = json.dumps(data).encode('utf-8')
+    
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+
+def get_file_sha(path):
+    """Obtenir le SHA d'un fichier existant sur GitHub"""
+    result = github_api('GET', f'contents/{path}')
+    return result.get('sha') if result else None
+
+def push_file_to_github(path, content, message):
+    """Créer ou mettre à jour un fichier sur GitHub"""
+    sha = get_file_sha(path)
+    
+    data = {
+        'message': message,
+        'content': base64.b64encode(content.encode('utf-8')).decode('utf-8')
+    }
+    
+    if sha:
+        data['sha'] = sha
+    
+    return github_api('PUT', f'contents/{path}', data)
+
+def get_template_from_github(filename):
+    """Récupérer un template depuis GitHub"""
+    result = github_api('GET', f'contents/templates/{filename}')
+    if result and 'content' in result:
+        return base64.b64decode(result['content']).decode('utf-8')
+    return None
+
+# === GÉNÉRATION SITE ===
+
+def slugify(text):
+    """Convertir texte en slug URL"""
+    if not text:
+        return 'bien'
+    text = unicodedata.normalize('NFD', text.lower())
+    text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
+    text = ''.join(c if c.isalnum() else '-' for c in text)
+    text = '-'.join(filter(None, text.split('-')))
+    return text
+
+def format_price(price):
+    """Formater le prix en français"""
+    if not price:
+        return '0'
+    return '{:,}'.format(int(price)).replace(',', ' ')
+
+def generate_site_html(template, estate):
+    """Générer le HTML avec les données du bien"""
+    if not template:
+        return None
+    
+    html = template
+    
+    # Prix
+    price = estate.get('price', 0)
+    html = html.replace('198 000', format_price(price))
+    html = html.replace('198000', str(price))
+    
+    # Localisation
+    address = estate.get('address', {})
+    html = html.replace('Manzac-sur-Vern', address.get('locality', 'Ville'))
+    html = html.replace('24110', address.get('postal_code', '24000'))
+    
+    # Surfaces
+    living_area = estate.get('living_area', 0)
+    plot_area = estate.get('plot_area', 0)
+    
+    html = html.replace('"value": 106', f'"value": {living_area}')
+    html = html.replace('106 m²', f'{living_area} m²')
+    html = html.replace('106m²', f'{living_area}m²')
+    
+    html = html.replace('"value": 1889', f'"value": {plot_area}')
+    html = html.replace('1889 m²', f'{plot_area} m²')
+    html = html.replace('1889m²', f'{plot_area}m²')
+    
+    # Pièces
+    rooms = estate.get('rooms', 0)
+    bedrooms = estate.get('bedrooms', 0)
+    
+    html = html.replace('"numberOfRooms": 5', f'"numberOfRooms": {rooms}')
+    html = html.replace('"numberOfBedrooms": 3', f'"numberOfBedrooms": {bedrooms}')
+    html = html.replace('3 chambres', f'{bedrooms} chambres')
+    
+    # DPE/GES
+    energy = estate.get('energy', {})
+    dpe = energy.get('dpe', 'NC')
+    ges = energy.get('ges', 'NC')
+    
+    html = html.replace('DPE C', f'DPE {dpe}')
+    html = html.replace('GES A', f'GES {ges}')
+    
+    # GPS
+    location = estate.get('location', {})
+    lat = location.get('lat', 45.0)
+    lng = location.get('lng', 0.5)
+    
+    html = html.replace('45.1234', str(lat))
+    html = html.replace('0.5678', str(lng))
+    
+    return html
+
+def handle_sweepbright_webhook(post_data):
+    """Traite le webhook SweepBright"""
+    try:
+        data = json.loads(post_data)
+        event = data.get('event')
+        estate_id = data.get('estate_id')
+        
+        print(f"[WEBHOOK] Event: {event}, Estate: {estate_id}")
+        
+        if event == 'estate-deleted':
+            return {'success': True, 'message': 'Deletion noted'}
+        
+        if event not in ['estate-added', 'estate-updated']:
+            return {'success': True, 'message': 'Event ignored'}
+        
+        # 1. Token SweepBright
+        token = get_sweepbright_token()
+        print(f"[WEBHOOK] Token obtenu")
+        
+        # 2. Données du bien
+        estate = get_estate_data(estate_id, token)
+        reference = estate.get('reference', estate_id[:8])
+        print(f"[WEBHOOK] Bien récupéré: {reference}")
+        
+        # 3. Templates
+        template_fr = get_template_from_github('index_FR.html')
+        template_en = get_template_from_github('index_EN.html')
+        template_nl = get_template_from_github('index_NL.html')
+        chat_js = get_template_from_github('chat.js')
+        netlify_toml = get_template_from_github('netlify.toml')
+        
+        if not template_fr:
+            return {'success': False, 'error': 'Templates non trouvés sur GitHub'}
+        
+        # 4. Générer HTML
+        html_fr = generate_site_html(template_fr, estate)
+        html_en = generate_site_html(template_en, estate) if template_en else None
+        html_nl = generate_site_html(template_nl, estate) if template_nl else None
+        
+        # 5. Push sur GitHub
+        base_path = f'sites/{reference}'
+        
+        push_file_to_github(f'{base_path}/index.html', html_fr, f'Auto: Site {reference}')
+        print(f"[WEBHOOK] index.html pushed")
+        
+        if html_en:
+            push_file_to_github(f'{base_path}/en.html', html_en, f'Auto: EN {reference}')
+        if html_nl:
+            push_file_to_github(f'{base_path}/nl.html', html_nl, f'Auto: NL {reference}')
+        if chat_js:
+            push_file_to_github(f'{base_path}/netlify/functions/chat.js', chat_js, f'Auto: chat.js {reference}')
+        if netlify_toml:
+            push_file_to_github(f'{base_path}/netlify.toml', netlify_toml, f'Auto: netlify.toml {reference}')
+        
+        # 6. URL du site
+        locality = estate.get('address', {}).get('locality', 'bien')
+        site_url = f'https://nouveaute-maisonavendre-{slugify(locality)}.netlify.app'
+        
+        # 7. Renvoyer URL à SweepBright
+        send_url_to_sweepbright(estate_id, site_url, token)
+        print(f"[WEBHOOK] URL envoyée: {site_url}")
+        
+        return {
+            'success': True,
+            'url': site_url,
+            'reference': reference
+        }
+        
+    except Exception as e:
+        print(f"[WEBHOOK ERROR] {e}")
+        return {'success': False, 'error': str(e)}
 
 # === GÉNÉRATION RÉPONSE ===
 
@@ -464,12 +720,51 @@ class AxisHandler(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
         
+        # === WEBHOOK TEST ===
+        elif self.path.startswith('/webhook/test/'):
+            estate_id = self.path.split('/')[-1]
+            post_data = json.dumps({
+                'event': 'estate-added',
+                'estate_id': estate_id
+            })
+            result = handle_sweepbright_webhook(post_data)
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode('utf-8'))
+        
+        # === HEALTH CHECK ===
+        elif self.path == '/webhook/health':
+            result = {
+                'status': 'ok',
+                'service': 'axi-antho',
+                'webhook': 'sweepbright',
+                'timestamp': datetime.now().isoformat()
+            }
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode('utf-8'))
+        
         else:
             self.send_response(404)
             self.end_headers()
     
     def do_POST(self):
-        if self.path == "/chat":
+        # === WEBHOOK SWEEPBRIGHT ===
+        if self.path == '/webhook/sweepbright':
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length).decode('utf-8')
+            
+            result = handle_sweepbright_webhook(post_data)
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode('utf-8'))
+        
+        elif self.path == "/chat":
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length).decode('utf-8')
             
@@ -522,6 +817,7 @@ class AxisHandler(BaseHTTPRequestHandler):
 def main():
     print("=" * 40)
     print("AXIS - ICI DORDOGNE")
+    print("Webhook SweepBright: /webhook/sweepbright")
     print("=" * 40)
     
     fichiers_defaut = {
@@ -536,6 +832,12 @@ def main():
     for fichier, contenu_defaut in fichiers_defaut.items():
         if not os.path.exists(fichier):
             ecrire_fichier(fichier, contenu_defaut)
+    
+    # Vérifier config
+    if GITHUB_CONFIG['token']:
+        print(f"GitHub: {GITHUB_CONFIG['owner']}/{GITHUB_CONFIG['repo']} ✓")
+    else:
+        print("GitHub: TOKEN MANQUANT - ajouter GITHUB_TOKEN dans Railway")
     
     port = int(os.environ.get("PORT", 8080))
     serveur = HTTPServer(('0.0.0.0', port), AxisHandler)
