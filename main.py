@@ -28,6 +28,11 @@ GITHUB_CONFIG = {
     'token': os.environ.get('GITHUB_TOKEN', '')
 }
 
+NETLIFY_CONFIG = {
+    'token': os.environ.get('NETLIFY_TOKEN', ''),
+    'api_base': 'https://api.netlify.com/api/v1'
+}
+
 # === FONCTIONS FICHIERS ===
 
 def lire_fichier(chemin):
@@ -207,6 +212,55 @@ def get_template_from_github(filename):
         return base64.b64decode(result['content']).decode('utf-8')
     return None
 
+# === FONCTIONS NETLIFY ===
+
+def netlify_api(method, endpoint, data=None):
+    """Appel API Netlify"""
+    url = f"{NETLIFY_CONFIG['api_base']}/{endpoint}"
+    
+    headers = {
+        'Authorization': f'Bearer {NETLIFY_CONFIG["token"]}',
+        'Content-Type': 'application/json'
+    }
+    
+    if data:
+        data = json.dumps(data).encode('utf-8')
+    
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        print(f"[NETLIFY ERROR] {e.code}: {e.read().decode()}")
+        return None
+
+def create_netlify_site(site_name, repo_path):
+    """Créer un site Netlify lié au repo GitHub"""
+    data = {
+        'name': site_name,
+        'repo': {
+            'provider': 'github',
+            'repo': f"{GITHUB_CONFIG['owner']}/{GITHUB_CONFIG['repo']}",
+            'private': False,
+            'branch': 'main',
+            'dir': repo_path
+        }
+    }
+    
+    result = netlify_api('POST', 'sites', data)
+    if result:
+        print(f"[NETLIFY] Site créé: {result.get('ssl_url', result.get('url'))}")
+        return result
+    return None
+
+def get_netlify_site(site_name):
+    """Vérifier si un site existe déjà"""
+    result = netlify_api('GET', f'sites?name={site_name}')
+    if result and len(result) > 0:
+        return result[0]
+    return None
+
 # === GÉNÉRATION SITE ===
 
 def slugify(text):
@@ -348,10 +402,22 @@ def handle_sweepbright_webhook(post_data):
         if netlify_toml:
             push_file_to_github(f'{base_path}/netlify.toml', netlify_toml, f'Auto: netlify.toml {reference}')
         
-        # 6. URL du site (ville depuis location.city)
+        # 6. Créer le site Netlify
         location = estate.get('location', {})
         city = location.get('city', 'bien')
-        site_url = f'https://nouveaute-maisonavendre-{slugify(city)}.netlify.app'
+        site_name = f'nouveaute-maisonavendre-{slugify(city)}'
+        
+        # Vérifier si le site existe déjà
+        existing_site = get_netlify_site(site_name)
+        if not existing_site and NETLIFY_CONFIG['token']:
+            # Créer le site
+            netlify_site = create_netlify_site(site_name, f'sites/{reference}')
+            if netlify_site:
+                site_url = netlify_site.get('ssl_url', f'https://{site_name}.netlify.app')
+            else:
+                site_url = f'https://{site_name}.netlify.app'
+        else:
+            site_url = f'https://{site_name}.netlify.app'
         
         # 7. L'URL est retournée dans la réponse - SweepBright la récupère automatiquement
         print(f"[WEBHOOK] Site généré: {site_url}")
