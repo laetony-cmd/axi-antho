@@ -302,6 +302,7 @@ def generate_site_html(template, estate):
     city = location.get('city', 'Ville')
     postal_code = location.get('postal_code', '24000')
     html = html.replace('Manzac-sur-Vern', city)
+    html = html.replace('MANZAC-SUR-VERN', city.upper())
     html = html.replace('24110', postal_code)
     
     # Surfaces (structure: sizes.liveable_area.size, sizes.plot_area.size)
@@ -344,6 +345,38 @@ def generate_site_html(template, estate):
     
     html = html.replace('45.1234', str(lat))
     html = html.replace('0.5678', str(lng))
+    
+    # IMAGES - Remplacer les images locales par les vraies URLs SweepBright
+    images = estate.get('images', [])
+    if images and len(images) > 0:
+        # Image principale (facade)
+        if len(images) > 0:
+            html = html.replace('images/facade.png', images[0].get('url', ''))
+        if len(images) > 1:
+            html = html.replace('images/sejour.png', images[1].get('url', ''))
+        if len(images) > 2:
+            html = html.replace('images/cuisine.png', images[2].get('url', ''))
+        if len(images) > 3:
+            html = html.replace('images/chambre.png', images[3].get('url', ''))
+        if len(images) > 4:
+            html = html.replace('images/sdb.png', images[4].get('url', ''))
+        if len(images) > 5:
+            html = html.replace('images/garage.png', images[5].get('url', ''))
+        if len(images) > 6:
+            html = html.replace('images/jardin.png', images[6].get('url', ''))
+        
+        # Tableau JavaScript pour la galerie lightbox
+        js_images = [f"'{img.get('url', '')}'" for img in images[:10]]  # Max 10 images
+        old_js_array = """const images = [
+            'images/facade.png',
+            'images/sejour.png',
+            'images/cuisine.png',
+            'images/chambre.png',
+            'images/sdb.png',
+            'images/garage.png',
+            'images/jardin.png'"""
+        new_js_array = f"const images = [\n            {','.join(js_images)}"
+        html = html.replace(old_js_array, new_js_array)
     
     return html
 
