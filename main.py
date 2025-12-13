@@ -353,9 +353,8 @@ def handle_sweepbright_webhook(post_data):
         city = location.get('city', 'bien')
         site_url = f'https://nouveaute-maisonavendre-{slugify(city)}.netlify.app'
         
-        # 7. Renvoyer URL à SweepBright
-        send_url_to_sweepbright(estate_id, site_url, token)
-        print(f"[WEBHOOK] URL envoyée: {site_url}")
+        # 7. L'URL est retournée dans la réponse - SweepBright la récupère automatiquement
+        print(f"[WEBHOOK] Site généré: {site_url}")
         
         return {
             'success': True,
