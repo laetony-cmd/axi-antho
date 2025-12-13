@@ -223,6 +223,11 @@ def format_price(price):
     """Formater le prix en français"""
     if not price:
         return '0'
+    # Si price est un dict (format API SweepBright), extraire le montant
+    if isinstance(price, dict):
+        price = price.get('amount', 0)
+    if not price:
+        return '0'
     return '{:,}'.format(int(price)).replace(',', ' ')
 
 def generate_site_html(template, estate):
@@ -232,19 +237,25 @@ def generate_site_html(template, estate):
     
     html = template
     
-    # Prix
-    price = estate.get('price', 0)
-    html = html.replace('198 000', format_price(price))
-    html = html.replace('198000', str(price))
+    # Prix (structure: {"amount": 198000, "currency": "EUR"})
+    price = estate.get('price', {})
+    price_amount = price.get('amount', 0) if isinstance(price, dict) else 0
+    html = html.replace('198 000', format_price(price_amount))
+    html = html.replace('198000', str(price_amount))
     
-    # Localisation
-    address = estate.get('address', {})
-    html = html.replace('Manzac-sur-Vern', address.get('locality', 'Ville'))
-    html = html.replace('24110', address.get('postal_code', '24000'))
+    # Localisation (structure: location.city, location.postal_code)
+    location = estate.get('location', {})
+    city = location.get('city', 'Ville')
+    postal_code = location.get('postal_code', '24000')
+    html = html.replace('Manzac-sur-Vern', city)
+    html = html.replace('24110', postal_code)
     
-    # Surfaces
-    living_area = estate.get('living_area', 0)
-    plot_area = estate.get('plot_area', 0)
+    # Surfaces (structure: sizes.liveable_area.size, sizes.plot_area.size)
+    sizes = estate.get('sizes', {})
+    liveable = sizes.get('liveable_area', {})
+    living_area = liveable.get('size', 0) if isinstance(liveable, dict) else 0
+    plot = sizes.get('plot_area', {})
+    plot_area = plot.get('size', 0) if isinstance(plot, dict) else 0
     
     html = html.replace('"value": 106', f'"value": {living_area}')
     html = html.replace('106 m²', f'{living_area} m²')
@@ -254,26 +265,28 @@ def generate_site_html(template, estate):
     html = html.replace('1889 m²', f'{plot_area} m²')
     html = html.replace('1889m²', f'{plot_area}m²')
     
-    # Pièces
-    rooms = estate.get('rooms', 0)
+    # Pièces (rooms est une liste, bedrooms est un int)
+    rooms_list = estate.get('rooms', [])
+    rooms = len(rooms_list) if isinstance(rooms_list, list) else 0
     bedrooms = estate.get('bedrooms', 0)
     
     html = html.replace('"numberOfRooms": 5', f'"numberOfRooms": {rooms}')
     html = html.replace('"numberOfBedrooms": 3', f'"numberOfBedrooms": {bedrooms}')
     html = html.replace('3 chambres', f'{bedrooms} chambres')
     
-    # DPE/GES
-    energy = estate.get('energy', {})
+    # DPE/GES (structure: legal.energy.dpe, legal.energy.greenhouse_emissions)
+    legal = estate.get('legal', {})
+    energy = legal.get('energy', {})
     dpe = energy.get('dpe', 'NC')
-    ges = energy.get('ges', 'NC')
+    ges = energy.get('greenhouse_emissions', 'NC')
     
     html = html.replace('DPE C', f'DPE {dpe}')
     html = html.replace('GES A', f'GES {ges}')
     
-    # GPS
-    location = estate.get('location', {})
-    lat = location.get('lat', 45.0)
-    lng = location.get('lng', 0.5)
+    # GPS (structure: location.geo.latitude, location.geo.longitude)
+    geo = location.get('geo', {})
+    lat = geo.get('latitude', 45.0)
+    lng = geo.get('longitude', 0.5)
     
     html = html.replace('45.1234', str(lat))
     html = html.replace('0.5678', str(lng))
@@ -301,7 +314,8 @@ def handle_sweepbright_webhook(post_data):
         
         # 2. Données du bien
         estate = get_estate_data(estate_id, token)
-        reference = estate.get('reference', estate_id[:8])
+        settings = estate.get('settings', {})
+        reference = settings.get('reference', estate_id[:8])
         print(f"[WEBHOOK] Bien récupéré: {reference}")
         
         # 3. Templates
@@ -334,9 +348,10 @@ def handle_sweepbright_webhook(post_data):
         if netlify_toml:
             push_file_to_github(f'{base_path}/netlify.toml', netlify_toml, f'Auto: netlify.toml {reference}')
         
-        # 6. URL du site
-        locality = estate.get('address', {}).get('locality', 'bien')
-        site_url = f'https://nouveaute-maisonavendre-{slugify(locality)}.netlify.app'
+        # 6. URL du site (ville depuis location.city)
+        location = estate.get('location', {})
+        city = location.get('city', 'bien')
+        site_url = f'https://nouveaute-maisonavendre-{slugify(city)}.netlify.app'
         
         # 7. Renvoyer URL à SweepBright
         send_url_to_sweepbright(estate_id, site_url, token)
