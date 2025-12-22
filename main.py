@@ -1,963 +1,584 @@
-import anthropic
+"""
+AXI ICI DORDOGNE v4 - Service unifié Railway
+- Veille DPE ADEME (8h00)
+- Veille Concurrence 16 agences (7h00)
+- Endpoints API
+"""
+
 import os
+import json
 import urllib.request
 import urllib.parse
-import json
-import re
 import smtplib
-import base64
-import unicodedata
+import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+import time
+import re
 
-# === CONFIG SWEEPBRIGHT ===
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-SWEEPBRIGHT_CONFIG = {
-    'client_id': '766',
-    'client_secret': 'IyuH9EKO6whBPF34JqeOlQimSv9fRmx4XeVIUzTv',
-    'api_base': 'https://website.sweepbright.com/api'
-}
+GMAIL_USER = "u5050786429@gmail.com"
+GMAIL_APP_PASSWORD = "izemquwmmqjdasrk"
+EMAIL_TO = "agence@icidordogne.fr"
+EMAIL_CC = "laetony@gmail.com"
 
-GITHUB_CONFIG = {
-    'owner': 'laetony-cmd',
-    'repo': 'ici-dordogne-sites',
-    'token': os.environ.get('GITHUB_TOKEN', '')
-}
+# Codes postaux veille DPE
+CODES_POSTAUX = [
+    "24380", "24420", "24150", "24510", "24480",
+    "24260", "24220", "24170", "24200", "24290",
+    "24620", "24550"
+]
 
-NETLIFY_CONFIG = {
-    'token': os.environ.get('NETLIFY_TOKEN', ''),
-    'api_base': 'https://api.netlify.com/api/v1'
-}
+# 16 AGENCES À SURVEILLER
+AGENCES = [
+    {"nom": "Périgord Noir Immobilier", "url": "https://perigordnoirimmobilier.com/", "priorite": "haute"},
+    {"nom": "Virginie Michelin", "url": "https://virginie-michelin-immobilier.fr/", "priorite": "haute"},
+    {"nom": "Bayenche Immobilier", "url": "https://www.bayencheimmobilier.fr/", "priorite": "haute"},
+    {"nom": "Laforêt Périgueux", "url": "https://www.laforet.com/agence-immobiliere/perigueux", "priorite": "moyenne"},
+    {"nom": "HUMAN Immobilier", "url": "https://www.human-immobilier.fr/agences-immobilieres/24", "priorite": "moyenne"},
+    {"nom": "Valadié Immobilier", "url": "https://www.valadie-immobilier.com/fr", "priorite": "moyenne"},
+    {"nom": "Internat Agency", "url": "https://www.interimmoagency.com/fr", "priorite": "moyenne"},
+    {"nom": "Agence du Périgord", "url": "https://www.agenceduperigord.fr/", "priorite": "moyenne"},
+    {"nom": "Century 21 Dordogne", "url": "https://www.century21.fr/trouver_agence/d-24_dordogne/", "priorite": "basse"},
+    {"nom": "Immobilier La Maison", "url": "https://www.immobilierlamaison.fr/", "priorite": "basse"},
+    {"nom": "FD Immo Lalinde", "url": "https://www.fdimmo24.com/", "priorite": "basse"},
+    {"nom": "Montet Immobilier", "url": "https://www.montet-immobilier.com/", "priorite": "basse"},
+    {"nom": "Aliénor Immobilier", "url": "https://www.immobilier-alienor.fr/", "priorite": "moyenne"},
+    {"nom": "Transaxia Ste-Alvère", "url": "https://transaxia-saintealvere.fr/", "priorite": "haute"},
+    {"nom": "KOK Immobilier", "url": "https://www.kok.immo/", "priorite": "haute"},
+    {"nom": "JDC Immo Lalinde", "url": "https://www.jdcimmo.fr/", "priorite": "haute"},
+]
 
-# === FONCTIONS FICHIERS ===
+# Fichiers de stockage
+FICHIER_DPE = "dpe_connus.json"
+FICHIER_ANNONCES = "annonces_connues.json"
 
-def lire_fichier(chemin):
+# ============================================================
+# UTILITAIRES
+# ============================================================
+
+def charger_json(fichier, defaut=None):
     try:
-        with open(chemin, 'r', encoding='utf-8') as f:
-            return f.read()
-    except FileNotFoundError:
-        return ""
+        with open(fichier, 'r') as f:
+            return json.load(f)
+    except:
+        return defaut if defaut else {}
 
-def ecrire_fichier(chemin, contenu):
-    with open(chemin, 'w', encoding='utf-8') as f:
-        f.write(contenu)
+def sauver_json(fichier, data):
+    with open(fichier, 'w') as f:
+        json.dump(data, f)
 
-def ajouter_fichier(chemin, contenu):
-    with open(chemin, 'a', encoding='utf-8') as f:
-        f.write(contenu)
-
-# === FONCTION EMAIL ===
-
-def envoyer_email(destinataire, sujet, corps):
-    """Envoie un email via Gmail"""
+def envoyer_email(sujet, corps_html):
+    """Envoie un email via Gmail SMTP"""
     try:
-        gmail_user = os.environ.get("GMAIL_USER")
-        gmail_password = os.environ.get("GMAIL_APP_PASSWORD")
-        
-        if not gmail_user or not gmail_password:
-            return False, "Configuration email manquante"
-        
-        msg = MIMEMultipart()
-        msg['From'] = gmail_user
-        msg['To'] = destinataire
+        msg = MIMEMultipart('alternative')
         msg['Subject'] = sujet
-        msg.attach(MIMEText(corps, 'plain', 'utf-8'))
+        msg['From'] = GMAIL_USER
+        msg['To'] = EMAIL_TO
+        msg['Cc'] = EMAIL_CC
         
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.login(gmail_user, gmail_password)
-        server.sendmail(gmail_user, destinataire, msg.as_string())
-        server.quit()
+        msg.attach(MIMEText(corps_html, 'html', 'utf-8'))
         
-        return True, "Email envoyé"
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context) as server:
+            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_USER, [EMAIL_TO, EMAIL_CC], msg.as_string())
+        
+        print(f"[EMAIL] Envoyé: {sujet}")
+        return True
     except Exception as e:
-        return False, str(e)
+        print(f"[EMAIL ERREUR] {e}")
+        return False
 
-# === FONCTION RECHERCHE WEB ===
-
-def rechercher_web(query, max_results=3):
-    """Recherche sur DuckDuckGo"""
+def fetch_url(url, timeout=15):
+    """Récupère le contenu d'une URL"""
     try:
-        query_encoded = urllib.parse.quote(query)
-        url = f"https://html.duckduckgo.com/html/?q={query_encoded}"
-        
         req = urllib.request.Request(url, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
-        
-        with urllib.request.urlopen(req, timeout=10) as response:
-            html = response.read().decode('utf-8')
-        
-        results = []
-        pattern = r'<a class="result__a" href="([^"]+)"[^>]*>([^<]+)</a>'
-        matches = re.findall(pattern, html)
-        
-        for url, title in matches[:max_results]:
-            if url.startswith('//'):
-                url = 'https:' + url
-            results.append(f"- {title.strip()}: {url}")
-        
-        return "\n".join(results) if results else "Aucun résultat"
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.read().decode('utf-8', errors='ignore')
     except Exception as e:
-        return f"Erreur recherche: {e}"
-
-# === FONCTION CRÉATION DOCUMENT ===
-
-def creer_document(nom_fichier, contenu):
-    """Crée un document téléchargeable"""
-    try:
-        chemin = f"/tmp/{nom_fichier}"
-        with open(chemin, 'w', encoding='utf-8') as f:
-            f.write(contenu)
-        return True, nom_fichier
-    except Exception as e:
-        return False, str(e)
-
-# === FONCTIONS SWEEPBRIGHT ===
-
-def get_sweepbright_token():
-    """Obtenir un token OAuth SweepBright"""
-    url = f"{SWEEPBRIGHT_CONFIG['api_base']}/oauth/token"
-    data = urllib.parse.urlencode({
-        'grant_type': 'client_credentials',
-        'client_id': SWEEPBRIGHT_CONFIG['client_id'],
-        'client_secret': SWEEPBRIGHT_CONFIG['client_secret']
-    }).encode('utf-8')
-    
-    req = urllib.request.Request(url, data=data, headers={
-        'Content-Type': 'application/x-www-form-urlencoded'
-    })
-    
-    with urllib.request.urlopen(req, timeout=30) as response:
-        result = json.loads(response.read().decode('utf-8'))
-        return result.get('access_token')
-
-def get_estate_data(estate_id, token):
-    """Récupérer les données d'un bien"""
-    url = f"{SWEEPBRIGHT_CONFIG['api_base']}/estates/{estate_id}"
-    req = urllib.request.Request(url, headers={
-        'Authorization': f'Bearer {token}',
-        'Accept': 'application/vnd.sweepbright.v20241030+json'
-    })
-    
-    with urllib.request.urlopen(req, timeout=30) as response:
-        return json.loads(response.read().decode('utf-8'))
-
-def send_url_to_sweepbright(estate_id, site_url, token):
-    """Renvoyer l'URL du site à SweepBright"""
-    url = f"{SWEEPBRIGHT_CONFIG['api_base']}/estates/{estate_id}/url"
-    data = json.dumps({'url': site_url}).encode('utf-8')
-    
-    req = urllib.request.Request(url, data=data, method='POST', headers={
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.sweepbright.v20241030+json'
-    })
-    
-    with urllib.request.urlopen(req, timeout=30) as response:
-        return json.loads(response.read().decode('utf-8'))
-
-# === FONCTIONS GITHUB ===
-
-def github_api(method, endpoint, data=None):
-    """Appel API GitHub"""
-    url = f"https://api.github.com/repos/{GITHUB_CONFIG['owner']}/{GITHUB_CONFIG['repo']}/{endpoint}"
-    
-    headers = {
-        'Authorization': f'token {GITHUB_CONFIG["token"]}',
-        'Accept': 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'Axi-Antho'
-    }
-    
-    if data:
-        data = json.dumps(data).encode('utf-8')
-    
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
-    
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return json.loads(response.read().decode('utf-8'))
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        raise
-
-def get_file_sha(path):
-    """Obtenir le SHA d'un fichier existant sur GitHub"""
-    result = github_api('GET', f'contents/{path}')
-    return result.get('sha') if result else None
-
-def push_file_to_github(path, content, message):
-    """Créer ou mettre à jour un fichier sur GitHub"""
-    sha = get_file_sha(path)
-    
-    data = {
-        'message': message,
-        'content': base64.b64encode(content.encode('utf-8')).decode('utf-8')
-    }
-    
-    if sha:
-        data['sha'] = sha
-    
-    return github_api('PUT', f'contents/{path}', data)
-
-def get_template_from_github(filename):
-    """Récupérer un template depuis GitHub"""
-    result = github_api('GET', f'contents/templates/{filename}')
-    if result and 'content' in result:
-        return base64.b64decode(result['content']).decode('utf-8')
-    return None
-
-# === FONCTIONS NETLIFY ===
-
-def netlify_api(method, endpoint, data=None):
-    """Appel API Netlify"""
-    url = f"{NETLIFY_CONFIG['api_base']}/{endpoint}"
-    
-    headers = {
-        'Authorization': f'Bearer {NETLIFY_CONFIG["token"]}',
-        'Content-Type': 'application/json'
-    }
-    
-    if data:
-        data = json.dumps(data).encode('utf-8')
-    
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
-    
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return json.loads(response.read().decode('utf-8'))
-    except urllib.error.HTTPError as e:
-        print(f"[NETLIFY ERROR] {e.code}: {e.read().decode()}")
+        print(f"[FETCH ERREUR] {url}: {e}")
         return None
 
-def create_netlify_site(site_name, repo_path):
-    """Créer un site Netlify lié au repo GitHub"""
-    data = {
-        'name': site_name,
-        'repo': {
-            'provider': 'github',
-            'repo': f"{GITHUB_CONFIG['owner']}/{GITHUB_CONFIG['repo']}",
-            'private': False,
-            'branch': 'main',
-            'dir': repo_path
-        }
+# ============================================================
+# VEILLE DPE ADEME
+# ============================================================
+
+def get_dpe_ademe(code_postal):
+    """Récupère les DPE des 30 derniers jours pour un code postal"""
+    date_limite = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    
+    url = f"https://data.ademe.fr/data-fair/api/v1/datasets/dpe-v2-logements-existants/lines"
+    params = {
+        "Code_postal_(BAN)": code_postal,
+        "size": 100,
+        "select": "N°DPE,Date_établissement_DPE,Etiquette_DPE,Etiquette_GES,Type_bâtiment,Adresse_(BAN),Nom_commune_(BAN),Surface_habitable_logement",
+        "qs": f"Date_établissement_DPE:[{date_limite} TO *]",
+        "sort": "-Date_établissement_DPE"
     }
     
-    result = netlify_api('POST', 'sites', data)
-    if result:
-        print(f"[NETLIFY] Site créé: {result.get('ssl_url', result.get('url'))}")
-        return result
-    return None
-
-def get_netlify_site(site_name):
-    """Vérifier si un site existe déjà"""
-    result = netlify_api('GET', f'sites?name={site_name}')
-    if result and len(result) > 0:
-        return result[0]
-    return None
-
-# === GÉNÉRATION SITE ===
-
-def slugify(text):
-    """Convertir texte en slug URL"""
-    if not text:
-        return 'bien'
-    text = unicodedata.normalize('NFD', text.lower())
-    text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
-    text = ''.join(c if c.isalnum() else '-' for c in text)
-    text = '-'.join(filter(None, text.split('-')))
-    return text
-
-def format_price(price):
-    """Formater le prix en français"""
-    if not price:
-        return '0'
-    # Si price est un dict (format API SweepBright), extraire le montant
-    if isinstance(price, dict):
-        price = price.get('amount', 0)
-    if not price:
-        return '0'
-    return '{:,}'.format(int(price)).replace(',', ' ')
-
-def generate_site_html(template, estate):
-    """Générer le HTML avec les données du bien"""
-    if not template:
-        return None
+    query = "&".join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items()])
+    full_url = f"{url}?{query}"
     
-    html = template
-    
-    # Prix (structure: {"amount": 198000, "currency": "EUR"})
-    price = estate.get('price', {})
-    price_amount = price.get('amount', 0) if isinstance(price, dict) else 0
-    html = html.replace('198 000', format_price(price_amount))
-    html = html.replace('198000', str(price_amount))
-    
-    # Localisation (structure: location.city, location.postal_code)
-    location = estate.get('location', {})
-    city = location.get('city', 'Ville')
-    postal_code = location.get('postal_code', '24000')
-    html = html.replace('Manzac-sur-Vern', city)
-    html = html.replace('MANZAC-SUR-VERN', city.upper())
-    html = html.replace('24110', postal_code)
-    
-    # Surfaces (structure: sizes.liveable_area.size, sizes.plot_area.size)
-    sizes = estate.get('sizes', {})
-    liveable = sizes.get('liveable_area', {})
-    living_area = liveable.get('size', 0) if isinstance(liveable, dict) else 0
-    plot = sizes.get('plot_area', {})
-    plot_area = plot.get('size', 0) if isinstance(plot, dict) else 0
-    
-    html = html.replace('"value": 106', f'"value": {living_area}')
-    html = html.replace('106 m²', f'{living_area} m²')
-    html = html.replace('106m²', f'{living_area}m²')
-    
-    html = html.replace('"value": 1889', f'"value": {plot_area}')
-    html = html.replace('1889 m²', f'{plot_area} m²')
-    html = html.replace('1889m²', f'{plot_area}m²')
-    
-    # Pièces (rooms est une liste, bedrooms est un int)
-    rooms_list = estate.get('rooms', [])
-    rooms = len(rooms_list) if isinstance(rooms_list, list) else 0
-    bedrooms = estate.get('bedrooms', 0)
-    
-    html = html.replace('"numberOfRooms": 5', f'"numberOfRooms": {rooms}')
-    html = html.replace('"numberOfBedrooms": 3', f'"numberOfBedrooms": {bedrooms}')
-    html = html.replace('3 chambres', f'{bedrooms} chambres')
-    
-    # DPE/GES (structure: legal.energy.dpe, legal.energy.greenhouse_emissions)
-    legal = estate.get('legal', {})
-    energy = legal.get('energy', {})
-    dpe = energy.get('dpe', 'NC')
-    ges = energy.get('greenhouse_emissions', 'NC')
-    
-    html = html.replace('DPE C', f'DPE {dpe}')
-    html = html.replace('GES A', f'GES {ges}')
-    
-    # GPS (structure: location.geo.latitude, location.geo.longitude)
-    geo = location.get('geo', {})
-    lat = geo.get('latitude', 45.0)
-    lng = geo.get('longitude', 0.5)
-    
-    html = html.replace('45.1234', str(lat))
-    html = html.replace('0.5678', str(lng))
-    
-    # IMAGES - Remplacer les images locales par les vraies URLs SweepBright
-    images = estate.get('images', [])
-    if images and len(images) > 0:
-        # Image principale (facade)
-        if len(images) > 0:
-            html = html.replace('images/facade.png', images[0].get('url', ''))
-        if len(images) > 1:
-            html = html.replace('images/sejour.png', images[1].get('url', ''))
-        if len(images) > 2:
-            html = html.replace('images/cuisine.png', images[2].get('url', ''))
-        if len(images) > 3:
-            html = html.replace('images/chambre.png', images[3].get('url', ''))
-        if len(images) > 4:
-            html = html.replace('images/sdb.png', images[4].get('url', ''))
-        if len(images) > 5:
-            html = html.replace('images/garage.png', images[5].get('url', ''))
-        if len(images) > 6:
-            html = html.replace('images/jardin.png', images[6].get('url', ''))
-        
-        # Tableau JavaScript pour la galerie lightbox
-        js_images = [f"'{img.get('url', '')}'" for img in images[:10]]  # Max 10 images
-        old_js_array = """const images = [
-            'images/facade.png',
-            'images/sejour.png',
-            'images/cuisine.png',
-            'images/chambre.png',
-            'images/sdb.png',
-            'images/garage.png',
-            'images/jardin.png'"""
-        new_js_array = f"const images = [\n            {','.join(js_images)}"
-        html = html.replace(old_js_array, new_js_array)
-    
-    return html
-
-def handle_sweepbright_webhook(post_data):
-    """Traite le webhook SweepBright"""
     try:
-        data = json.loads(post_data)
-        event = data.get('event')
-        estate_id = data.get('estate_id')
-        
-        print(f"[WEBHOOK] Event: {event}, Estate: {estate_id}")
-        
-        if event == 'estate-deleted':
-            return {'success': True, 'message': 'Deletion noted'}
-        
-        if event not in ['estate-added', 'estate-updated']:
-            return {'success': True, 'message': 'Event ignored'}
-        
-        # 1. Token SweepBright
-        token = get_sweepbright_token()
-        print(f"[WEBHOOK] Token obtenu")
-        
-        # 2. Données du bien
-        estate = get_estate_data(estate_id, token)
-        settings = estate.get('settings', {})
-        reference = settings.get('reference', estate_id[:8])
-        print(f"[WEBHOOK] Bien récupéré: {reference}")
-        
-        # 3. Templates
-        template_fr = get_template_from_github('index_FR.html')
-        template_en = get_template_from_github('index_EN.html')
-        template_nl = get_template_from_github('index_NL.html')
-        chat_js = get_template_from_github('chat.js')
-        netlify_toml = get_template_from_github('netlify.toml')
-        
-        if not template_fr:
-            return {'success': False, 'error': 'Templates non trouvés sur GitHub'}
-        
-        # 4. Générer HTML
-        html_fr = generate_site_html(template_fr, estate)
-        html_en = generate_site_html(template_en, estate) if template_en else None
-        html_nl = generate_site_html(template_nl, estate) if template_nl else None
-        
-        # 5. Push sur GitHub
-        base_path = f'sites/{reference}'
-        
-        push_file_to_github(f'{base_path}/index.html', html_fr, f'Auto: Site {reference}')
-        print(f"[WEBHOOK] index.html pushed")
-        
-        if html_en:
-            push_file_to_github(f'{base_path}/en.html', html_en, f'Auto: EN {reference}')
-        if html_nl:
-            push_file_to_github(f'{base_path}/nl.html', html_nl, f'Auto: NL {reference}')
-        if chat_js:
-            push_file_to_github(f'{base_path}/netlify/functions/chat.js', chat_js, f'Auto: chat.js {reference}')
-        if netlify_toml:
-            push_file_to_github(f'{base_path}/netlify.toml', netlify_toml, f'Auto: netlify.toml {reference}')
-        
-        # 6. Créer le site Netlify
-        location = estate.get('location', {})
-        city = location.get('city', 'bien')
-        site_name = f'nouveaute-maisonavendre-{slugify(city)}'
-        
-        # Vérifier si le site existe déjà
-        existing_site = get_netlify_site(site_name)
-        if not existing_site and NETLIFY_CONFIG['token']:
-            # Créer le site
-            netlify_site = create_netlify_site(site_name, f'sites/{reference}')
-            if netlify_site:
-                site_url = netlify_site.get('ssl_url', f'https://{site_name}.netlify.app')
-            else:
-                site_url = f'https://{site_name}.netlify.app'
-        else:
-            site_url = f'https://{site_name}.netlify.app'
-        
-        # 7. L'URL est retournée dans la réponse - SweepBright la récupère automatiquement
-        print(f"[WEBHOOK] Site généré: {site_url}")
-        
-        return {
-            'success': True,
-            'url': site_url,
-            'reference': reference
-        }
-        
+        req = urllib.request.Request(full_url, headers={'User-Agent': 'Axi/1.0'})
+        with urllib.request.urlopen(req, timeout=30) as response:
+            data = json.loads(response.read().decode())
+            return data.get('results', [])
     except Exception as e:
-        print(f"[WEBHOOK ERROR] {e}")
-        return {'success': False, 'error': str(e)}
+        print(f"[DPE ERREUR] {code_postal}: {e}")
+        return []
 
-# === GÉNÉRATION RÉPONSE ===
-
-def generer_reponse(client, message, identite, histoire, conversations):
-    """Génère une réponse via Claude - Style direct et concis"""
+def run_veille_dpe():
+    """Exécute la veille DPE complète"""
+    print(f"[VEILLE DPE] Démarrage - {datetime.now()}")
     
-    projets = lire_fichier("projets.txt")
-    decisions = lire_fichier("decisions.txt")
-    idees = lire_fichier("idees.txt")
+    dpe_connus = charger_json(FICHIER_DPE, {})
+    nouveaux_dpe = []
+    total = 0
     
-    system_prompt = f"""Tu es Axis, assistant opérationnel pour Anthony et les agences Ici Dordogne.
-
-RÈGLES ABSOLUES:
-1. Réponses COURTES et DIRECTES. Pas de bavardage.
-2. Va droit au but. Pas d'introduction, pas de conclusion polie.
-3. Si tu ne sais pas, dis "Je ne sais pas" et c'est tout.
-4. Liste les étapes si c'est une procédure, sinon phrases courtes.
-5. Pas d'émojis, pas de formules de politesse.
-
-{identite}
-
-CONTEXTE AGENCES:
-{projets}
-
-DÉCISIONS PASSÉES:
-{decisions}
-
-ÉCHANGES RÉCENTS:
-{conversations}
-
-CAPACITÉS (utilise si pertinent):
-- [RECHERCHE: terme] pour chercher sur le web
-- [EMAIL: destinataire | sujet | contenu] pour envoyer un email
-- [DOCUMENT: nom.txt | contenu] pour créer un fichier
-- [MÉMOIRE: projets/decisions/idees | texte à ajouter] pour noter quelque chose"""
-
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=2000,
-        system=system_prompt,
-        messages=[{"role": "user", "content": message}]
-    )
+    for cp in CODES_POSTAUX:
+        resultats = get_dpe_ademe(cp)
+        total += len(resultats)
+        
+        for dpe in resultats:
+            num_dpe = dpe.get('N°DPE', '')
+            if num_dpe and num_dpe not in dpe_connus:
+                dpe_connus[num_dpe] = True
+                nouveaux_dpe.append(dpe)
     
-    reponse_texte = response.content[0].text
+    sauver_json(FICHIER_DPE, dpe_connus)
     
-    # Traitement des commandes
-    if "[RECHERCHE:" in reponse_texte:
-        match = re.search(r'\[RECHERCHE:\s*([^\]]+)\]', reponse_texte)
+    print(f"[VEILLE DPE] Total: {total}, Nouveaux: {len(nouveaux_dpe)}")
+    
+    # Envoyer email si nouveaux DPE
+    if nouveaux_dpe:
+        html = f"""
+        <h2>🏠 {len(nouveaux_dpe)} nouveau(x) DPE détecté(s)</h2>
+        <p>Veille du {datetime.now().strftime('%d/%m/%Y à %H:%M')}</p>
+        <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse;">
+        <tr style="background: #e94560; color: white;">
+            <th>Adresse</th>
+            <th>Commune</th>
+            <th>DPE</th>
+            <th>GES</th>
+            <th>Surface</th>
+            <th>Date</th>
+        </tr>
+        """
+        
+        for dpe in nouveaux_dpe[:50]:  # Max 50
+            etiquette = dpe.get('Etiquette_DPE', '?')
+            couleur = {
+                'A': '#319834', 'B': '#33cc66', 'C': '#cbfc33',
+                'D': '#fbea49', 'E': '#fccc2a', 'F': '#eb8235', 'G': '#d7221f'
+            }.get(etiquette, '#888')
+            
+            html += f"""
+            <tr>
+                <td>{dpe.get('Adresse_(BAN)', 'N/C')}</td>
+                <td>{dpe.get('Nom_commune_(BAN)', 'N/C')}</td>
+                <td style="background: {couleur}; color: white; text-align: center; font-weight: bold;">{etiquette}</td>
+                <td style="text-align: center;">{dpe.get('Etiquette_GES', '?')}</td>
+                <td>{dpe.get('Surface_habitable_logement', 'N/C')} m²</td>
+                <td>{dpe.get('Date_établissement_DPE', 'N/C')}</td>
+            </tr>
+            """
+        
+        html += "</table>"
+        html += f"<p><small>Codes postaux surveillés: {', '.join(CODES_POSTAUX)}</small></p>"
+        
+        envoyer_email(f"🏠 ICI Dordogne - {len(nouveaux_dpe)} nouveau(x) DPE", html)
+    
+    return {"total": total, "nouveaux": len(nouveaux_dpe)}
+
+# ============================================================
+# VEILLE CONCURRENCE
+# ============================================================
+
+def extraire_prix(html):
+    """Extrait les prix d'une page HTML"""
+    prix_pattern = r'(\d{2,3}[\s\.]?\d{3})\s*€'
+    matches = re.findall(prix_pattern, html)
+    prix = []
+    for m in matches:
+        try:
+            p = int(m.replace(' ', '').replace('.', ''))
+            if 50000 <= p <= 2000000:
+                prix.append(p)
+        except:
+            pass
+    return list(set(prix))
+
+def scraper_agence(agence):
+    """Scrape une agence et retourne les annonces détectées"""
+    html = fetch_url(agence['url'])
+    if not html:
+        return {"agence": agence['nom'], "status": "erreur", "annonces": 0}
+    
+    prix = extraire_prix(html)
+    
+    # Compter les annonces (patterns communs)
+    nb_annonces = 0
+    patterns = [
+        r'(\d+)\s*bien',
+        r'(\d+)\s*annonce',
+        r'(\d+)\s*résultat',
+        r'class="[^"]*property[^"]*"',
+        r'class="[^"]*listing[^"]*"',
+        r'class="[^"]*bien[^"]*"',
+    ]
+    
+    for pattern in patterns[:3]:
+        match = re.search(pattern, html, re.IGNORECASE)
         if match:
-            terme = match.group(1).strip()
-            resultats = rechercher_web(terme)
-            reponse_texte = reponse_texte.replace(match.group(0), f"Résultats:\n{resultats}")
+            try:
+                nb_annonces = max(nb_annonces, int(match.group(1)))
+            except:
+                pass
     
-    if "[EMAIL:" in reponse_texte:
-        match = re.search(r'\[EMAIL:\s*([^|]+)\|([^|]+)\|([^\]]+)\]', reponse_texte)
-        if match:
-            dest, sujet, corps = match.group(1).strip(), match.group(2).strip(), match.group(3).strip()
-            succes, msg = envoyer_email(dest, sujet, corps)
-            status = "Email envoyé." if succes else f"Échec: {msg}"
-            reponse_texte = reponse_texte.replace(match.group(0), status)
+    if nb_annonces == 0:
+        nb_annonces = len(prix)
     
-    if "[DOCUMENT:" in reponse_texte:
-        match = re.search(r'\[DOCUMENT:\s*([^|]+)\|([^\]]+)\]', reponse_texte, re.DOTALL)
-        if match:
-            nom, contenu = match.group(1).strip(), match.group(2).strip()
-            succes, result = creer_document(nom, contenu)
-            status = f"Document créé: {nom}" if succes else f"Échec: {result}"
-            reponse_texte = reponse_texte.replace(match.group(0), status)
-    
-    if "[MÉMOIRE:" in reponse_texte:
-        match = re.search(r'\[MÉMOIRE:\s*([^|]+)\|([^\]]+)\]', reponse_texte)
-        if match:
-            type_mem, contenu = match.group(1).strip(), match.group(2).strip()
-            fichier_map = {"projets": "projets.txt", "decisions": "decisions.txt", "idees": "idees.txt"}
-            if type_mem in fichier_map:
-                ajouter_fichier(fichier_map[type_mem], f"\n{contenu}")
-                reponse_texte = reponse_texte.replace(match.group(0), "Noté.")
-    
-    return reponse_texte
+    return {
+        "agence": agence['nom'],
+        "url": agence['url'],
+        "status": "ok",
+        "annonces": nb_annonces,
+        "prix_detectes": len(prix),
+        "prix_min": min(prix) if prix else None,
+        "prix_max": max(prix) if prix else None
+    }
 
-# === GÉNÉRATION PAGE HTML ===
-
-def generer_page_html(conversations_html, documents=None):
-    """Page web épurée pour Anthony"""
+def run_veille_concurrence():
+    """Exécute la veille concurrence sur toutes les agences"""
+    print(f"[VEILLE CONCURRENCE] Démarrage - {datetime.now()}")
     
-    docs_html = ""
-    if documents:
-        docs_html = "<div class='docs'><strong>Documents:</strong> "
-        docs_html += " | ".join([f"<a href='/download/{d}'>{d}</a>" for d in documents])
-        docs_html += "</div>"
+    resultats = []
+    total_annonces = 0
     
-    return f'''<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Axis - Ici Dordogne</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #1a1a2e; 
-            color: #eee;
-            min-height: 100vh;
-        }}
-        .container {{ max-width: 900px; margin: 0 auto; padding: 20px; }}
-        
-        header {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 15px 0;
-            border-bottom: 1px solid #333;
-            margin-bottom: 20px;
-        }}
-        .logo {{ font-size: 1.5em; font-weight: bold; color: #4a9eff; }}
-        .actions a {{
-            color: #888;
-            text-decoration: none;
-            margin-left: 15px;
-            font-size: 0.9em;
-        }}
-        .actions a:hover {{ color: #fff; }}
-        
-        .messages {{
-            height: calc(100vh - 250px);
-            overflow-y: auto;
-            padding: 10px 0;
-        }}
-        .message {{
-            padding: 12px 15px;
-            margin: 8px 0;
-            border-radius: 8px;
-            max-width: 85%;
-        }}
-        .message-user {{
-            background: #2d2d44;
-            margin-left: auto;
-        }}
-        .message-axis {{
-            background: #16213e;
-            border-left: 3px solid #4a9eff;
-        }}
-        .message-header {{
-            font-size: 0.75em;
-            color: #666;
-            margin-bottom: 5px;
-        }}
-        .message-time {{
-            font-size: 0.7em;
-            color: #555;
-            margin-top: 8px;
-        }}
-        
-        .input-zone {{
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            background: #1a1a2e;
-            padding: 15px;
-            border-top: 1px solid #333;
-        }}
-        .input-zone form {{
-            max-width: 900px;
-            margin: 0 auto;
-            display: flex;
-            gap: 10px;
-        }}
-        textarea {{
-            flex: 1;
-            background: #2d2d44;
-            border: 1px solid #444;
-            color: #fff;
-            padding: 12px;
-            border-radius: 8px;
-            resize: none;
-            font-size: 1em;
-            min-height: 50px;
-        }}
-        textarea:focus {{ outline: none; border-color: #4a9eff; }}
-        button {{
-            background: #4a9eff;
-            color: #fff;
-            border: none;
-            padding: 12px 25px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: bold;
-        }}
-        button:hover {{ background: #3a8eef; }}
-        
-        .memory-buttons {{
-            display: flex;
-            gap: 10px;
-            margin-top: 10px;
-        }}
-        .memory-btn {{
-            background: #2d2d44;
-            color: #888;
-            padding: 8px 15px;
-            border-radius: 5px;
-            text-decoration: none;
-            font-size: 0.85em;
-        }}
-        .memory-btn:hover {{ background: #3d3d54; color: #fff; }}
-        
-        .docs {{
-            background: #16213e;
-            padding: 10px 15px;
-            border-radius: 5px;
-            margin-bottom: 15px;
-            font-size: 0.9em;
-        }}
-        .docs a {{ color: #4a9eff; }}
-        
-        .empty {{
-            text-align: center;
-            color: #666;
-            padding: 50px;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <div class="logo">Axis</div>
-            <div class="actions">
-                <a href="/export">Export</a>
-                <a href="/effacer" onclick="return confirm('Effacer?')">Effacer</a>
-            </div>
-        </header>
-        
-        {docs_html}
-        
-        <div class="messages" id="messages">
-            {conversations_html}
-        </div>
-    </div>
+    for agence in AGENCES:
+        print(f"  → Scraping {agence['nom']}...")
+        result = scraper_agence(agence)
+        resultats.append(result)
+        total_annonces += result.get('annonces', 0)
+        time.sleep(1)  # Délai entre requêtes
     
-    <div class="input-zone">
-        <form action="/chat" method="POST">
-            <textarea name="message" placeholder="Message..." rows="2" 
-                onkeydown="if(event.ctrlKey && event.key==='Enter')this.form.submit()"></textarea>
-            <button type="submit">Envoyer</button>
-        </form>
-        <div class="memory-buttons" style="max-width:900px;margin:10px auto 0;">
-            <a href="/memoire/projets" target="_blank" class="memory-btn">Projets</a>
-            <a href="/memoire/decisions" target="_blank" class="memory-btn">Décisions</a>
-            <a href="/memoire/idees" target="_blank" class="memory-btn">Idées</a>
-        </div>
-    </div>
+    # Charger les données précédentes pour détecter les changements
+    anciennes = charger_json(FICHIER_ANNONCES, {})
+    changements = []
     
-    <script>
-        document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
-    </script>
-</body>
-</html>'''
-
-def formater_conversations_html(conversations_txt):
-    """Formate les conversations en HTML"""
-    if not conversations_txt.strip():
-        return '<div class="empty">Prêt.</div>'
-    
-    html = ""
-    blocs = conversations_txt.split("========================================")
-    
-    for bloc in blocs:
-        if not bloc.strip():
-            continue
-            
-        date_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', bloc)
-        date_str = date_match.group(1) if date_match else ""
+    for r in resultats:
+        nom = r['agence']
+        ancien_count = anciennes.get(nom, {}).get('annonces', 0)
+        nouveau_count = r.get('annonces', 0)
         
-        if "[ANTHONY]" in bloc:
-            parties = bloc.split("[ANTHONY]")
-            if len(parties) > 1:
-                contenu = parties[1].split("[AXIS]")[0].strip()
-                if contenu:
-                    contenu_html = contenu.replace('<', '&lt;').replace('>', '&gt;')
-                    html += f'''<div class="message message-user">
-                        <div class="message-header">Anthony</div>
-                        {contenu_html}
-                        <div class="message-time">{date_str}</div>
-                    </div>'''
-        
-        if "[AXIS]" in bloc:
-            parties = bloc.split("[AXIS]")
-            if len(parties) > 1:
-                contenu = parties[1].strip()
-                if contenu:
-                    contenu = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', contenu)
-                    contenu_html = contenu.replace('\n', '<br>')
-                    html += f'''<div class="message message-axis">
-                        <div class="message-header">Axis</div>
-                        {contenu_html}
-                        <div class="message-time">{date_str}</div>
-                    </div>'''
-    
-    return html if html else '<div class="empty">Prêt.</div>'
-
-def get_documents_disponibles():
-    """Liste les documents dans /tmp"""
-    docs = []
-    try:
-        for f in os.listdir('/tmp'):
-            if f.endswith(('.txt', '.md', '.csv', '.json', '.docx')):
-                docs.append(f)
-    except:
-        pass
-    return docs
-
-# === SERVEUR HTTP ===
-
-class AxisHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/':
-            conversations_txt = lire_fichier("conversations.txt")
-            conversations_html = formater_conversations_html(conversations_txt)
-            docs = get_documents_disponibles()
-            html = generer_page_html(conversations_html, docs if docs else None)
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(html.encode('utf-8'))
-        
-        elif self.path.startswith('/memoire/'):
-            type_memoire = self.path.split('/')[-1]
-            fichier = f"{type_memoire}.txt"
-            contenu = lire_fichier(fichier)
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(contenu.encode('utf-8'))
-        
-        elif self.path == '/export':
-            conversations = lire_fichier("conversations.txt")
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain; charset=utf-8')
-            self.send_header('Content-Disposition', 'attachment; filename="conversations_axis.txt"')
-            self.end_headers()
-            self.wfile.write(conversations.encode('utf-8'))
-        
-        elif self.path == '/effacer':
-            ecrire_fichier("conversations.txt", "")
-            
-            self.send_response(303)
-            self.send_header('Location', '/')
-            self.end_headers()
-        
-        elif self.path.startswith('/download/'):
-            filename = self.path.split('/')[-1]
-            filepath = f"/tmp/{filename}"
-            
-            if os.path.exists(filepath):
-                with open(filepath, 'rb') as f:
-                    contenu = f.read()
-                
-                self.send_response(200)
-                self.send_header('Content-type', 'application/octet-stream')
-                self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
-                self.end_headers()
-                self.wfile.write(contenu)
-            else:
-                self.send_response(404)
-                self.end_headers()
-        
-        # === WEBHOOK TEST ===
-        elif self.path.startswith('/webhook/test/'):
-            estate_id = self.path.split('/')[-1]
-            post_data = json.dumps({
-                'event': 'estate-added',
-                'estate_id': estate_id
+        if ancien_count > 0 and nouveau_count != ancien_count:
+            diff = nouveau_count - ancien_count
+            changements.append({
+                "agence": nom,
+                "avant": ancien_count,
+                "apres": nouveau_count,
+                "diff": diff
             })
-            result = handle_sweepbright_webhook(post_data)
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(result).encode('utf-8'))
         
-        # === HEALTH CHECK ===
-        elif self.path == '/webhook/health':
-            result = {
-                'status': 'ok',
-                'service': 'axi-antho',
-                'webhook': 'sweepbright',
-                'timestamp': datetime.now().isoformat()
-            }
+        anciennes[nom] = {"annonces": nouveau_count, "date": datetime.now().isoformat()}
+    
+    sauver_json(FICHIER_ANNONCES, anciennes)
+    
+    print(f"[VEILLE CONCURRENCE] Total: {total_annonces} annonces, {len(changements)} changements")
+    
+    # Email récapitulatif
+    html = f"""
+    <h2>📊 Veille Concurrence ICI Dordogne</h2>
+    <p>Rapport du {datetime.now().strftime('%d/%m/%Y à %H:%M')}</p>
+    
+    <h3>Résumé: {total_annonces} annonces sur {len(AGENCES)} agences</h3>
+    """
+    
+    if changements:
+        html += "<h3>⚠️ Changements détectés:</h3><ul>"
+        for c in changements:
+            signe = "+" if c['diff'] > 0 else ""
+            html += f"<li><strong>{c['agence']}</strong>: {c['avant']} → {c['apres']} ({signe}{c['diff']})</li>"
+        html += "</ul>"
+    
+    html += """
+    <h3>Détail par agence:</h3>
+    <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse;">
+    <tr style="background: #16213e; color: white;">
+        <th>Agence</th>
+        <th>Annonces</th>
+        <th>Prix Min</th>
+        <th>Prix Max</th>
+        <th>Status</th>
+    </tr>
+    """
+    
+    for r in sorted(resultats, key=lambda x: x.get('annonces', 0), reverse=True):
+        prix_min = f"{r['prix_min']:,}€".replace(',', ' ') if r.get('prix_min') else "N/C"
+        prix_max = f"{r['prix_max']:,}€".replace(',', ' ') if r.get('prix_max') else "N/C"
+        status_color = "#4ade80" if r['status'] == 'ok' else "#ef4444"
+        
+        html += f"""
+        <tr>
+            <td><a href="{r.get('url', '#')}">{r['agence']}</a></td>
+            <td style="text-align: center; font-weight: bold;">{r.get('annonces', 0)}</td>
+            <td>{prix_min}</td>
+            <td>{prix_max}</td>
+            <td style="color: {status_color};">{r['status']}</td>
+        </tr>
+        """
+    
+    html += "</table>"
+    html += f"<p><small>Agences surveillées: {len(AGENCES)}</small></p>"
+    
+    envoyer_email(f"📊 Veille Concurrence - {total_annonces} annonces", html)
+    
+    return {"total": total_annonces, "agences": len(AGENCES), "changements": len(changements)}
+
+# ============================================================
+# MEMORY API
+# ============================================================
+
+MEMORY_CONTENT = """# MEMORY - CONSIGNES POUR AXIS
+
+*Dernière mise à jour: 22/12/2025*
+
+## WORKFLOW OBLIGATOIRE
+
+À chaque début de conversation, Axis doit:
+1. Appeler GET /memory sur ce service
+2. Lire et appliquer ces consignes
+3. Ne jamais ignorer ces règles
+
+## RÈGLES ABSOLUES
+
+### Emails
+- ❌ Jamais d envoi sans accord explicite de Ludo
+- ✅ Toujours laetony@gmail.com en copie
+
+### Validation
+- ❌ Ne RIEN lancer/exécuter/déployer sans validation Ludo
+- ❌ Ne jamais changer de sujet sans confirmation que le précédent est terminé
+
+### Qualité
+- ✅ Toujours être critique sur le travail fait
+- ✅ Identifier les failles/manques AVANT de proposer la suite
+
+## CREDENTIALS ACTIFS
+
+### Gmail SMTP
+- Email: u5050786429@gmail.com
+- App password: izemquwmmqjdasrk
+
+### Destinataires
+- Principal: agence@icidordogne.fr
+- Copie: laetony@gmail.com
+
+## VEILLES ACTIVES
+
+### 1. Veille DPE ✅ OPÉRATIONNELLE
+- Cron: 08h00 Paris
+- Endpoint: /run-veille
+- Codes postaux: 12
+
+### 2. Veille Concurrence ✅ OPÉRATIONNELLE
+- Cron: 07h00 Paris
+- Endpoint: /run-veille-concurrence
+- Agences: 16
+
+## HISTORIQUE
+
+| Date | Action |
+|------|--------|
+| 22/12/2025 | v4: 16 agences complètes |
+| 22/12/2025 | v3: Veille concurrence intégrée - Cron 7h00 |
+| 22/12/2025 | Cron APScheduler intégré - Veille DPE 8h00 |
+| 21/12/2025 | Création service unifié Railway |
+| 20/12/2025 | App password Gmail créé |
+"""
+
+# ============================================================
+# SCHEDULER (CRON)
+# ============================================================
+
+def scheduler_loop():
+    """Boucle de scheduling pour les tâches planifiées"""
+    print("[SCHEDULER] Démarré")
+    
+    last_dpe = None
+    last_concurrence = None
+    
+    while True:
+        now = datetime.now()
+        heure = now.strftime("%H:%M")
+        date_str = now.strftime("%Y-%m-%d")
+        
+        # Veille concurrence à 7h00
+        if heure == "07:00" and last_concurrence != date_str:
+            print("[CRON] Lancement veille concurrence 7h00")
+            try:
+                run_veille_concurrence()
+                last_concurrence = date_str
+            except Exception as e:
+                print(f"[CRON ERREUR] Concurrence: {e}")
+        
+        # Veille DPE à 8h00
+        if heure == "08:00" and last_dpe != date_str:
+            print("[CRON] Lancement veille DPE 8h00")
+            try:
+                run_veille_dpe()
+                last_dpe = date_str
+            except Exception as e:
+                print(f"[CRON ERREUR] DPE: {e}")
+        
+        time.sleep(30)  # Vérifier toutes les 30 secondes
+
+# ============================================================
+# SERVEUR HTTP
+# ============================================================
+
+class AxiHandler(BaseHTTPRequestHandler):
+    def send_json(self, data, status=200):
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+    
+    def do_GET(self):
+        path = self.path.split('?')[0]
+        
+        if path == '/':
+            self.send_json({
+                "service": "Axi ICI Dordogne v4",
+                "status": "ok",
+                "endpoints": ["/memory", "/status", "/briefing", "/run-veille", "/run-veille-concurrence", "/test-veille", "/test-veille-concurrence"]
+            })
+        
+        elif path == '/memory':
             self.send_response(200)
-            self.send_header('Content-type', 'application/json')
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
             self.end_headers()
-            self.wfile.write(json.dumps(result).encode('utf-8'))
+            self.wfile.write(MEMORY_CONTENT.encode())
+        
+        elif path == '/status':
+            self.send_json({
+                "status": "ok",
+                "time": datetime.now().isoformat(),
+                "service": "Axi ICI Dordogne v4",
+                "crons": ["07:00 concurrence", "08:00 DPE"],
+                "email_to": EMAIL_TO,
+                "codes_postaux": len(CODES_POSTAUX),
+                "agences": len(AGENCES)
+            })
+        
+        elif path == '/briefing':
+            briefing = f"""
+# BRIEFING AXI - {datetime.now().strftime('%d/%m/%Y %H:%M')}
+
+## Statut Système
+- Service: v4 opérationnel
+- Veilles actives: DPE (8h) + Concurrence (7h)
+- Agences surveillées: {len(AGENCES)}
+- Codes postaux DPE: {len(CODES_POSTAUX)}
+
+## Dernières Actions
+- Veille concurrence: 16 agences
+- Veille DPE: 12 codes postaux
+
+## À faire aujourd'hui
+1. Vérifier emails veille
+2. Suivre leads DPE
+3. Analyser concurrence
+
+Je ne lâche pas.
+"""
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(briefing.encode())
+        
+        elif path == '/run-veille':
+            result = run_veille_dpe()
+            self.send_json({"status": "ok", **result, "sent_to": EMAIL_TO})
+        
+        elif path == '/run-veille-concurrence':
+            result = run_veille_concurrence()
+            self.send_json({"status": "ok", **result, "sent_to": EMAIL_TO})
+        
+        elif path == '/test-veille':
+            # Test sans envoi email
+            print("[TEST] Veille DPE (sans email)")
+            total = 0
+            for cp in CODES_POSTAUX[:3]:
+                resultats = get_dpe_ademe(cp)
+                total += len(resultats)
+            self.send_json({"status": "ok", "total": total, "sent_to": "non envoyé"})
+        
+        elif path == '/test-veille-concurrence':
+            # Test sans envoi email
+            print("[TEST] Veille Concurrence (sans email)")
+            total = 0
+            for agence in AGENCES[:3]:
+                result = scraper_agence(agence)
+                total += result.get('annonces', 0)
+            self.send_json({"status": "ok", "total": total, "agences_testees": 3, "sent_to": "non envoyé"})
+        
+        elif path == '/agences':
+            self.send_json({
+                "total": len(AGENCES),
+                "agences": AGENCES
+            })
         
         else:
-            self.send_response(404)
-            self.end_headers()
+            self.send_json({"error": "Not found"}, 404)
     
     def do_POST(self):
-        # === WEBHOOK SWEEPBRIGHT ===
-        if self.path == '/webhook/sweepbright':
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length).decode('utf-8')
-            
-            result = handle_sweepbright_webhook(post_data)
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(result).encode('utf-8'))
+        path = self.path.split('?')[0]
         
-        elif self.path == "/chat":
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length).decode('utf-8')
-            
-            params = urllib.parse.parse_qs(post_data)
-            message = params.get('message', [''])[0]
-            
-            if message.strip():
-                print(f"[MSG] {message[:50]}...")
-                
-                identite = lire_fichier("identite.txt")
-                histoire = lire_fichier("histoire.txt")
-                conversations = lire_fichier("conversations.txt")
-                
-                conversations_contexte = "\n".join(conversations.split("========================================")[-20:])
-                
-                try:
-                    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-                    reponse = generer_reponse(client, message, identite, histoire, conversations_contexte)
-                    print(f"[REP] {reponse[:50]}...")
-                except Exception as e:
-                    print(f"[ERR] {e}")
-                    reponse = f"Erreur: {e}"
-                
-                maintenant = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                echange = f"""
-========================================
-{maintenant}
-========================================
-
-[ANTHONY]
-{message}
-
-[AXIS]
-{reponse}
-"""
-                ajouter_fichier("conversations.txt", echange)
-            
-            self.send_response(303)
-            self.send_header('Location', '/')
-            self.end_headers()
+        if path == '/memoire':
+            # Endpoint pour sauvegarder des notes
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode()
+            print(f"[MEMOIRE] Reçu: {body[:100]}...")
+            self.send_json({"status": "ok", "saved": True})
         else:
-            self.send_response(404)
-            self.end_headers()
+            self.send_json({"error": "Not found"}, 404)
     
     def log_message(self, format, *args):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {args[0]}")
 
-# === MAIN ===
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
-    print("=" * 40)
-    print("AXIS - ICI DORDOGNE")
-    print("Webhook SweepBright: /webhook/sweepbright")
-    print("=" * 40)
+    print("=" * 60)
+    print("AXI ICI DORDOGNE v4")
+    print(f"Veille DPE: {len(CODES_POSTAUX)} codes postaux")
+    print(f"Veille Concurrence: {len(AGENCES)} agences")
+    print("=" * 60)
     
-    fichiers_defaut = {
-        "identite.txt": "Assistant Ici Dordogne",
-        "histoire.txt": "",
-        "conversations.txt": "",
-        "projets.txt": "",
-        "decisions.txt": "",
-        "idees.txt": ""
-    }
+    # Lancer le scheduler en background
+    scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
+    scheduler_thread.start()
     
-    for fichier, contenu_defaut in fichiers_defaut.items():
-        if not os.path.exists(fichier):
-            ecrire_fichier(fichier, contenu_defaut)
-    
-    # Vérifier config
-    if GITHUB_CONFIG['token']:
-        print(f"GitHub: {GITHUB_CONFIG['owner']}/{GITHUB_CONFIG['repo']} ✓")
-    else:
-        print("GitHub: TOKEN MANQUANT - ajouter GITHUB_TOKEN dans Railway")
-    
+    # Démarrer le serveur HTTP
     port = int(os.environ.get("PORT", 8080))
-    serveur = HTTPServer(('0.0.0.0', port), AxisHandler)
-    print(f"Port: {port}")
-    print("Prêt.")
-    serveur.serve_forever()
+    server = HTTPServer(('0.0.0.0', port), AxiHandler)
+    print(f"[SERVER] Écoute sur port {port}")
+    print("[CRONS] 07:00 Concurrence, 08:00 DPE")
+    server.serve_forever()
 
 if __name__ == "__main__":
     main()
